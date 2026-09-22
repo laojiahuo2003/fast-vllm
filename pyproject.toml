@@ -12,11 +12,11 @@ readme = "README.md"
 description = "a lightweight vLLM implementation built from scratch"
 requires-python = ">=3.10,<3.13"
 dependencies = [
-    "torch>=2.4.0",
-    "triton>=3.0.0",
-    "transformers>=4.51.0",
-    "flash-attn",
-    "xxhash",
+    "torch==2.13.0+cu126",
+    "triton==3.7.1",
+    "transformers==5.17.0",
+    "flash-attn==2.8.3.post1",
+    "xxhash==4.0.1",
 ]
 
 [project.urls]
@@ -25,3 +25,13 @@ Homepage="https://github.com/laojiahuo2003/fast-vllm"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["fastvllm*"]
+
+# PyTorch 官方 CUDA 12.6 wheelhouse。torch 需要从这里的 +cu126 build 安装，
+# 常规 PyPI/tuna 源只有无 CUDA 或 cu13 的 build，会导致 flash-attn 二进制不匹配。
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }

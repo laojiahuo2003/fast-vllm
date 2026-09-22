@@ -45,14 +45,14 @@ class LLMEngine:
             prompt = self.tokenizer.encode(prompt)
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
-
     def step(self):
-        seqs, is_prefill = self.scheduler.schedule()
-        num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
-        self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        seqs = self.scheduler.schedule()  # 可混合 decode+prefill
+        prefill_tokens = sum(s.num_scheduled_tokens for s in seqs if s.is_prefill)
+        decode_tokens = sum(1 for s in seqs if not s.is_prefill)
+        token_ids = self.model_runner.call("run", seqs)
+        self.scheduler.postprocess(seqs, token_ids)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
-        return outputs, num_tokens
+        return outputs, prefill_tokens, decode_tokens
 
     def is_finished(self):
         return self.scheduler.is_finished()
@@ -72,11 +72,11 @@ class LLMEngine:
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
             t = perf_counter()
-            output, num_tokens = self.step()
-            if num_tokens > 0:
-                prefill_throughput = num_tokens / (perf_counter() - t)
-            else:
-                decode_throughput = -num_tokens / (perf_counter() - t)
+            output, prefill_tokens, decode_tokens = self.step()
+            if prefill_tokens:
+                prefill_throughput = prefill_tokens / (perf_counter() - t)
+            if decode_tokens:
+                decode_throughput = decode_tokens / (perf_counter() - t)
             pbar.set_postfix({
                 "Prefill": f"{int(prefill_throughput)}tok/s",
                 "Decode": f"{int(decode_throughput)}tok/s",

@@ -97,7 +97,7 @@ class ModelRunner:
         seqs = [Sequence([0] * seq_len) for _ in range(num_seqs)]
         for seq in seqs:
             seq.num_scheduled_tokens = seq_len
-        self.run(seqs, True)
+        self.run(seqs)
         torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
@@ -215,14 +215,37 @@ class ModelRunner:
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+    def run1(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids
+    # 一次完整推理 Step 的总入口。seqs 可能同时包含 decode 与 prefill 两类，
+    # 分别分组处理：decode 走 CUDA Graph，prefill 走 eager，随后把采样结果按原位置填回。
+    def run(self, seqs: list[Sequence]) -> list[int | None]:
+        result: list[int | None] = [None] * len(seqs)
+        deco_pos = [i for i, s in enumerate(seqs) if not s.is_prefill]
+        prefill_pos = [i for i, s in enumerate(seqs) if s.is_prefill]
 
+        def _step_group(group: list[Sequence], positions: list[int], is_prefill: bool):
+            if not group:
+                return
+            input_ids, pos = (self.prepare_prefill(group) if is_prefill
+                              else self.prepare_decode(group))
+            temperatures = self.prepare_sample(group) if self.rank == 0 else None
+            logits = self.run_model(input_ids, pos, is_prefill)
+            if self.rank == 0:
+                tids = self.sampler(logits, temperatures).tolist()
+                for i, tid in zip(positions, tids):
+                    result[i] = tid
+            reset_context()
+
+        _step_group([s for s in seqs if not s.is_prefill], deco_pos, False)
+        _step_group([s for s in seqs if s.is_prefill], prefill_pos, True)
+        return result
+    
     @torch.inference_mode()
     def capture_cudagraph(self):
         config = self.config

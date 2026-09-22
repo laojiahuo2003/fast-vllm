@@ -42,6 +42,8 @@ class BlockManager:
         return h.intdigest()# 返回最终的整数hash
     # 分配一个空闲的物理块，返回ID
     def _allocate_block(self) -> int:
+        if not self.free_block_ids:
+            raise IndexError("KV cache block pool exhausted")  # 最后防线：不应被调到空池
         block_id = self.free_block_ids.popleft()
         block = self.blocks[block_id]
         assert block.ref_count == 0
@@ -57,6 +59,14 @@ class BlockManager:
         self.free_block_ids.append(block_id)
     # 这个 Sequence 如果现在要运行，需要多少新 Block？有多少旧 Block 可以复用？显存够不够？
     def can_allocate(self, seq: Sequence) -> int:
+        # 如果seq已经缓存过prefix信息，直接使用
+        if hasattr(seq, '_cached_prefix_blocks') and seq._cached_prefix_blocks is not None:
+            num_cached_blocks = seq._cached_prefix_blocks
+            num_new_blocks = seq.num_blocks - (num_cached_blocks if seq._cached_prefix_blocks in self.used_block_ids else 0)
+            if len(self.free_block_ids) < num_new_blocks:
+                return -1
+            return num_cached_blocks
+
         h = -1
         num_cached_blocks = 0# 有多少block可以从prefix cache中复用
         num_new_blocks = seq.num_blocks# 序列目前总共需要多少新block
@@ -70,6 +80,10 @@ class BlockManager:
             num_cached_blocks += 1# 当前block可以复用，所以加1
             if block_id in self.used_block_ids:
                 num_new_blocks -= 1 # 如果这个block在使用队列中，那么就不需要再分配新block（修正seq的内部状态）
+
+        # 缓存结果，避免重复计算
+        seq._cached_prefix_blocks = num_cached_blocks
+
         if len(self.free_block_ids) < num_new_blocks:
             return -1# 空闲block不够，返回-1表示不能分配
         return num_cached_blocks# 可以复用多少个完整 Prefix Block
@@ -103,13 +117,43 @@ class BlockManager:
                 self._deallocate_block(block_id)
         seq.num_cached_tokens = 0
         seq.block_table.clear()
+
+    # recompute-mode重计算 抢占：只释放 seq 尾部若干 Block 回 free，保留前面已算好的 KV。
+    # num_cached_tokens 回退到保留 Block 覆盖的 token 数，重新调度时只需重算尾部那段。
+    def deallocate_tail(self, seq:Sequence, num_blocks_to_free: int =1):
+        for _ in range(num_blocks_to_free):
+            if not seq.block_table:
+                break
+            # 释放序列最后一块block
+            block_id = seq.block_table.pop()
+            block = self.blocks[block_id]
+            block.ref_count-=1
+            if block.ref_count==0:
+                self._deallocate_block(block_id)
+        seq.num_cached_tokens = len(seq.block_table) * self.block_size # 重新计算序列已缓存的token数量
+        
+    # 给被抢占的seq补齐尾部缺失的Block；空余不足直接返回False
+    def ensure_tail_blocks(self,seq: Sequence)->bool:
+        # seq.num_blocks是根据总token算出来的总共block数量
+        missing = seq.num_blocks - len(seq.block_table)
+        if missing <=0:
+            return True
+        if len(self.free_block_ids)<missing:
+            return False
+        for _ in range(missing):
+            seq.block_table.append(self._allocate_block())
+        return True
+
     # seq追加token的时候，是否有足够的空闲block？
     def can_append(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)# 追加一个token是不是会跨一个新block
-    # 如果需要新block就分配一个
-    def may_append(self, seq: Sequence):
+    # 如果需要新block就分配一个；free 池不足时不分配，返回 False。
+    def may_append(self, seq: Sequence) -> bool:
         if len(seq) % self.block_size == 1:
+            if not self.free_block_ids:
+                return False
             seq.block_table.append(self._allocate_block())
+        return True
     # 把完整算好的block放入hash表
     def hash_blocks(self, seq: Sequence):
         # 开始block
