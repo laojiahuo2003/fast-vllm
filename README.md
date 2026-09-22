@@ -55,8 +55,3 @@ See `bench.py` for benchmark.
 |----------------|-------------|----------|-----------------------|
 | vLLM           | 133,966     | 98.37    | 1361.84               |
 | Fast-vLLM     | 133,966     | 93.41    | 1434.13               |
-
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=laojiahuo2003/fast-vllm&type=Date)](https://www.star-history.com/#laojiahuo2003/fast-vllm&Date)

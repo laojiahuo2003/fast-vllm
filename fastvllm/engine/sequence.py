@@ -6,9 +6,9 @@ from fastvllm.sampling_params import SamplingParams
 
 
 class SequenceStatus(Enum):
-    WAITING = auto()
-    RUNNING = auto()
-    FINISHED = auto()
+    WAITING = auto() # 队列等待调度
+    RUNNING = auto() # 正在推理循环
+    FINISHED = auto() # 触发EOS或者max_tokens
 
 
 class Sequence:
@@ -20,12 +20,12 @@ class Sequence:
         self.status = SequenceStatus.WAITING
         self.token_ids = copy(token_ids)
         self.last_token = token_ids[-1]
-        self.num_tokens = len(self.token_ids)
+        self.num_tokens = len(self.token_ids)# 会慢慢增加
         self.num_prompt_tokens = len(token_ids)
-        self.num_cached_tokens = 0
-        self.num_scheduled_tokens = 0
+        self.num_cached_tokens = 0 # 已经计算过的token数量
+        self.num_scheduled_tokens = 0 # 当前步调度器决定送入 GPU 计算的 token 数量
         self.is_prefill = True
-        self.block_table = []
+        self.block_table = []# 该序列，逻辑块到物理块的映射表
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos

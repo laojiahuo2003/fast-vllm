@@ -16,6 +16,9 @@ class Config:
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
+    # Chunked Prefill 分块旋钮：
+    # 调小→每步 prefill 被切小，P99/ITL 更优（延迟优先）；调大→TTFT/吞吐更优（吞吐优先）。
+    prefill_chunk_tokens: int = 0
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
