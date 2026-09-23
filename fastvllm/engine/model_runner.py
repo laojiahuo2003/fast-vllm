@@ -103,25 +103,67 @@ class ModelRunner:
     def allocate_kv_cache(self):
         config = self.config
         hf_config = config.hf_config
+
+        # 重置 CUDA 内存统计，避免残留的 peak 影响计算
+        torch.cuda.reset_peak_memory_stats()
+
         free, total = torch.cuda.mem_get_info()
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        # 每个block的内存占用大小
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
+
+        # 根据 kv_cache_dtype 计算每个 block 的内存占用
+        kv_cache_dtype = config.kv_cache_dtype
+        is_fp8 = kv_cache_dtype == torch.float8_e4m3fn
+        kv_dtype_size = kv_cache_dtype.itemsize if hasattr(kv_cache_dtype, 'itemsize') else torch.tensor([], dtype=kv_cache_dtype).element_size()
+
+        # 每个block的内存占用大小（K和V两个cache）
+        kv_block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * kv_dtype_size
+
+        # FP8 需要额外存储 V 的 per-token scale（每个 layer 每个 token 一个 FP32 scale）
+        if is_fp8:
+            # V scale: [num_layers, block_size] per block
+            scale_bytes_per_block = hf_config.num_hidden_layers * self.block_size * 4  # 4 bytes per float32
+            block_bytes = kv_block_bytes + scale_bytes_per_block
+        else:
+            block_bytes = kv_block_bytes
+
         # 计算可以分配的block数量
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
-        assert config.num_kvcache_blocks > 0
+        available_memory = int(total * config.gpu_memory_utilization - used - peak + current)
+        config.num_kvcache_blocks = available_memory // block_bytes
+        assert config.num_kvcache_blocks > 0, f"Not enough memory for KV cache. Available: {available_memory} bytes, per block: {block_bytes} bytes"
+
         # 创建kv缓存
-        self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
+        self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim, dtype=kv_cache_dtype)
+
+        # 如果是 FP8，创建 V 的 per-token scale cache
+        if is_fp8:
+            # V scale: [num_layers, num_slots] - 每个 token 一个 scale
+            num_slots = config.num_kvcache_blocks * self.block_size
+            self.v_scale_cache = torch.ones(hf_config.num_hidden_layers, num_slots, dtype=torch.float32, device='cuda')
+        else:
+            self.v_scale_cache = None
+
+        # 加载 per-layer K scales（如果提供）
+        if is_fp8 and config.kvcache_k_scale is not None:
+            k_scales = config.kvcache_k_scale
+        else:
+            k_scales = [1.0] * hf_config.num_hidden_layers
+
         layer_id = 0
         # 为每个layer绑定tensor
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
+                if is_fp8:
+                    module.k_scale = k_scales[layer_id]  # Per-layer K scale
+                    module.v_scale_cache = self.v_scale_cache[layer_id]
+                    module.is_fp8_kv_cache = True
+                else:
+                    module.is_fp8_kv_cache = False
                 layer_id += 1
     # 把 Python 里的 block_table 变成 GPU Tensor。
     def prepare_block_tables(self, seqs: list[Sequence]):
