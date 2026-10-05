@@ -27,6 +27,16 @@ class Config:
     # - str: JSON 文件路径（{"num_hidden_layers": N, "k_scale": [s0, s1, ...]}）
     # - list[float]: 直接传入每层 scale
     kvcache_k_scale: str | list[float] | None = None
+    # Eagle3 Speculative Decoding 配置：
+    enable_eagle3: bool = False  # 是否启用 Eagle3
+    eagle3_model_path: str | None = None  # Eagle3 draft head 路径
+    eagle3_extract_layers: list[int] | None = None  # 提取特征的层（默认 [1, 13, 24]）
+    # 每次生成的候选 token 数量。默认 3 不是随手取的：实测这个 draft head
+    # （Qwen3-0.6B-eagle3 v3）的链上条件一致率约 45%/71%/40%/0%，也就是候选链
+    # 走到第 4 个时已经基本死掉——k=3 与 k=4/k=5 每轮产出的 token 数一样都是
+    # 1.90，但 k=3 少跑 1 行 draft + 1 行 verify，墙钟更快。checkpoint 的模型卡
+    # 上 "steps 3 / topk 1 / draft 4 是上限，更深反而掉" 也是同一个结论。
+    num_speculative_tokens: int = 3  # 每次生成的候选 token 数量
 
     def __post_init__(self):
         assert os.path.isdir(self.model)

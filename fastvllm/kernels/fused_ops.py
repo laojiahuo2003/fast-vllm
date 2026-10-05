@@ -25,7 +25,7 @@ def silu_and_mul_kernel(
 ):
     row = tl.program_id(0)               # 第几行 (token)
     col_block = tl.program_id(1)         # 第几段列
-    cols = col_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    cols = col_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) #这样才能覆盖全部的intermediate
     mask = cols < intermediate           # 挡掉尾部越过 intermediate 的列
 
     # gate 在前半段, up 在后半段, 同一行连续内存各 load 一次

@@ -8,4 +8,5 @@ class SamplingParams:
     ignore_eos: bool = False
 
     def __post_init__(self):
-        assert self.temperature > 1e-10, "greedy sampling is not permitted"
+        # 支持贪心采样：temperature=0 会在采样时自动转为 argmax
+        assert self.temperature >= 0, "temperature must be non-negative"

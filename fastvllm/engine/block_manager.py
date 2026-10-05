@@ -146,13 +146,26 @@ class BlockManager:
 
     # seq追加token的时候，是否有足够的空闲block？
     def can_append(self, seq: Sequence) -> bool:
-        return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)# 追加一个token是不是会跨一个新block
+        # 如果 block_table 已经覆盖当前长度（投机解码预分配的场景），不需要新 block
+        if len(seq.block_table) >= seq.num_blocks:
+            return True
+        return bool(self.free_block_ids)  # 需要 1 个新 block
     # 如果需要新block就分配一个；free 池不足时不分配，返回 False。
     def may_append(self, seq: Sequence) -> bool:
-        if len(seq) % self.block_size == 1:
-            if not self.free_block_ids:
-                return False
-            seq.block_table.append(self._allocate_block())
+        # 投机解码的 _grow_block_table 可能提前扩展了 block_table，
+        # 这里先检查是否已有足够的 block，避免重复分配导致 block 泄漏。
+        if len(seq.block_table) >= seq.num_blocks:
+            return True
+        if not self.free_block_ids:
+            return False
+        seq.block_table.append(self._allocate_block())
+        return True
+    # 无条件追加一个 block（供投机解码一次写 k+1 个新 token 的 KV 使用）。
+    # 只按"想要的物理容量"分配，不管 len(seq) 是否跨块，避免读不到新 token 的 KV。
+    def append_block(self, seq: Sequence) -> bool:
+        if not self.free_block_ids:
+            return False
+        seq.block_table.append(self._allocate_block())
         return True
     # 把完整算好的block放入hash表
     def hash_blocks(self, seq: Sequence):

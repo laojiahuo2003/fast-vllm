@@ -143,6 +143,17 @@ class Attention(nn.Module):
     # Q = 【N, num_heads, head_dim】, V = 【N, num_kv_heads, head_dim】
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
+
+        # Speculative decoding: 使用临时 KV cache（不写入全局）
+        if context.use_temp_kv_cache:
+            # 不写入全局 KV cache，直接用当前的 k, v 做 attention
+            # 这用于 draft generation，候选 tokens 可能被拒绝
+            o = flash_attn_varlen_func(q, k, v,
+                                       max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
+                                       max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
+                                       softmax_scale=self.scale, causal=True, block_table=None)
+            return o
+
         k_cache, v_cache = self.k_cache, self.v_cache
 
         # 存储新的 KV（FP8 模式下会自动量化）
@@ -174,6 +185,15 @@ class Attention(nn.Module):
                                        max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+        elif context.is_spec_verify:
+            # Speculative decoding verify: q is [m, num_heads, head_dim] -> [1, m, num_heads, head_dim]
+            o = flash_attn_with_kvcache(
+                q.unsqueeze(0), k_cache, v_cache,
+                cache_seqlens=context.context_lens,
+                block_table=context.block_tables,
+                softmax_scale=self.scale,
+                causal=True
+            ).squeeze(0)
         else:    # decode
             o = flash_attn_with_kvcache(
                 q.unsqueeze(1), k_cache, v_cache,
